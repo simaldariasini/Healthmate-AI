@@ -19,9 +19,11 @@ async def lifespan(app):
  finally: db.close()
  yield
 app=FastAPI(title="HealthMate AI API",version="1.0.0",lifespan=lifespan)
-origins=os.getenv("CORS_ORIGINS","http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174").split(",")
+origins=[origin.strip().rstrip("/") for origin in os.getenv("CORS_ORIGINS","http://localhost:5173,http://127.0.0.1:5173,http://localhost:5174,http://127.0.0.1:5174").split(",") if origin.strip()]
 app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=True,allow_methods=["*"],allow_headers=["*"])
 SECRET=os.getenv("SESSION_SECRET","development-only-change-me")
+COOKIE_SECURE=os.getenv("COOKIE_SECURE","false").lower()=="true"
+COOKIE_SAMESITE=os.getenv("COOKIE_SAMESITE","none" if COOKIE_SECURE else "lax")
 def hash_password(p):
  salt=secrets.token_bytes(16); return base64.b64encode(salt).decode()+"$"+hashlib.pbkdf2_hmac("sha256",p.encode(),salt,210000).hex()
 def verify_password(p,v):
@@ -81,12 +83,12 @@ def health(): return {"status":"ok","service":"healthmate-api"}
 def signup(x:Credentials,response:Response,db:Session=Depends(get_db)):
  if "@" not in x.email or "." not in x.email.rsplit("@",1)[-1]: raise HTTPException(422,"Enter a valid email address.")
  if db.scalar(select(User).where(User.email==x.email.lower())): raise HTTPException(409,"An account with that email already exists.")
- u=User(email=x.email.lower(),name=x.name.strip() or x.email.split("@")[0],password_hash=hash_password(x.password)); u.profile=Profile(); db.add(u); db.commit(); db.refresh(u); response.set_cookie("session",token(u.id),httponly=True,samesite="lax",secure=os.getenv("COOKIE_SECURE","false").lower()=="true",max_age=604800); return profile_out(u)
+ u=User(email=x.email.lower(),name=x.name.strip() or x.email.split("@")[0],password_hash=hash_password(x.password)); u.profile=Profile(); db.add(u); db.commit(); db.refresh(u); response.set_cookie("session",token(u.id),httponly=True,samesite=COOKIE_SAMESITE,secure=COOKIE_SECURE,max_age=604800); return profile_out(u)
 @app.post("/api/auth/login")
 def login(x:Credentials,response:Response,db:Session=Depends(get_db)):
  u=db.scalar(select(User).where(User.email==x.email.lower()))
  if not u or not verify_password(x.password,u.password_hash): raise HTTPException(401,"Email or password is incorrect.")
- response.set_cookie("session",token(u.id),httponly=True,samesite="lax",secure=os.getenv("COOKIE_SECURE","false").lower()=="true",max_age=604800); return profile_out(u)
+ response.set_cookie("session",token(u.id),httponly=True,samesite=COOKIE_SAMESITE,secure=COOKIE_SECURE,max_age=604800); return profile_out(u)
 @app.post("/api/auth/logout")
 def logout(response:Response): response.delete_cookie("session"); return {"ok":True}
 @app.get("/api/auth/me")
@@ -202,3 +204,9 @@ def preview(x:AssistantIn,db:Session=Depends(get_db)):
 @app.get("/api/progress/summary")
 def progress(u:User=Depends(current_user),db:Session=Depends(get_db)):
  plans=db.scalar(select(func.count(MealPlan.id)).where(MealPlan.user_id==u.id)) or 0; completed=db.scalar(select(func.count(MealPlanItem.id)).join(MealPlan).where(MealPlan.user_id==u.id,MealPlanItem.completed.is_(True))) or 0; total=db.scalar(select(func.count(MealPlanItem.id)).join(MealPlan).where(MealPlan.user_id==u.id)) or 0; reminders=db.scalar(select(func.count(Reminder.id)).where(Reminder.user_id==u.id,Reminder.enabled.is_(True))) or 0; consistency=round(completed / total * 100) if total else 0; return {"meal_plans":plans,"meals_completed":completed,"meals_planned":total,"active_reminders":reminders,"planning_consistency":consistency,"message":"Progress reflects planning and routines, not body size or appearance."}
+@app.get("/")
+def root():
+    return {
+        "message": "HealthMate AI API is running",
+        "docs": "/docs"
+    }
